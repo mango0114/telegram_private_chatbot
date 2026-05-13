@@ -21,7 +21,8 @@ const CONFIG = {
     MAX_CLEANUP_DISPLAY: 20,
     CLEANUP_LOCK_TTL_SECONDS: 1800,     // /cleanup 防并发锁 30 分钟
     MAX_RETRY_ATTEMPTS: 3,
-    THREAD_HEALTH_TTL_MS: 60000
+    THREAD_HEALTH_TTL_MS: 60000,
+    VERIFIED_VALUE: "turnstile:v1"
 };
 
 // 线程健康检查缓存，减少频繁探测请求
@@ -492,6 +493,12 @@ async function handlePrivateMessage(msg, env, ctx) {
   if (isBanned) return;
 
   const verified = await env.TOPIC_MAP.get(`verified:${userId}`);
+
+  if (verified && verified !== "trusted" && verified !== CONFIG.VERIFIED_VALUE) {
+    await env.TOPIC_MAP.delete(`verified:${userId}`);
+    await sendVerificationChallenge(userId, env, msg.message_id || null, msg.from);
+    return;
+  }
 
   if (!verified) {
     const isStart = msg.text && msg.text.trim() === "/start";
@@ -1022,7 +1029,7 @@ async function completeTurnstileVerification(verifyId, env, ctx) {
     }
 
     const userId = state.userId;
-    await env.TOPIC_MAP.put(`verified:${userId}`, "1", { expirationTtl: CONFIG.VERIFIED_EXPIRE_SECONDS });
+    await env.TOPIC_MAP.put(`verified:${userId}`, CONFIG.VERIFIED_VALUE, { expirationTtl: CONFIG.VERIFIED_EXPIRE_SECONDS });
     await env.TOPIC_MAP.delete(`needs_verify:${userId}`);
     await env.TOPIC_MAP.delete(`chal:${verifyId}`);
     await env.TOPIC_MAP.delete(`user_challenge:${userId}`);
@@ -1134,7 +1141,7 @@ async function handleCallbackQuery(query, env, ctx) {
             });
 
             // 30天有效期 - 使用配置常量
-            await env.TOPIC_MAP.put(`verified:${userId}`, "1", { expirationTtl: CONFIG.VERIFIED_EXPIRE_SECONDS });
+            await env.TOPIC_MAP.put(`verified:${userId}`, CONFIG.VERIFIED_VALUE, { expirationTtl: CONFIG.VERIFIED_EXPIRE_SECONDS });
             await env.TOPIC_MAP.delete(`needs_verify:${userId}`);
 
             // 【修复 #1】清理所有相关挑战
