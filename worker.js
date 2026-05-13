@@ -22,7 +22,8 @@ const CONFIG = {
     CLEANUP_LOCK_TTL_SECONDS: 1800,     // /cleanup 防并发锁 30 分钟
     MAX_RETRY_ATTEMPTS: 3,
     THREAD_HEALTH_TTL_MS: 60000,
-    VERIFIED_VALUE: "turnstile:v1"
+    VERIFIED_VALUE: "turnstile:v1",
+    USER_ACK_DELETE_DELAY_MS: 5000
 };
 
 // 线程健康检查缓存，减少频繁探测请求
@@ -611,6 +612,12 @@ async function forwardToTopic(msg, userId, key, env, ctx) {
             targetChat: env.SUPERGROUP_ID,
             threadId: rec.thread_id
         });
+        const ackKey = `ack:${userId}:${msg.media_group_id}`;
+        const acked = await env.TOPIC_MAP.get(ackKey);
+        if (!acked) {
+            await env.TOPIC_MAP.put(ackKey, "1", { expirationTtl: CONFIG.MEDIA_GROUP_EXPIRE_SECONDS });
+            await sendTransientUserAck(env, ctx, userId);
+        }
         return;
     }
 
@@ -715,6 +722,8 @@ async function forwardToTopic(msg, userId, key, env, ctx) {
             message_thread_id: rec.thread_id
         });
     }
+
+    await sendTransientUserAck(env, ctx, userId);
 }
 
 async function handleAdminReply(msg, env, ctx) {
@@ -731,6 +740,16 @@ async function handleAdminReply(msg, env, ctx) {
   if (text === "/cleanup") {
       // /cleanup 可能处理较久，使用 waitUntil 防止 webhook 请求超时导致“卡住”
       ctx.waitUntil(handleCleanupCommand(threadId, env));
+      return;
+  }
+
+  if (text === "/menu") {
+      await setAdminCommandMenu(env, senderId);
+      await tgCall(env, "sendMessage", withMessageThreadId({
+          chat_id: env.SUPERGROUP_ID,
+          text: "✅ 已为你设置管理员中文菜单。菜单仅对你的账号可见。",
+          parse_mode: "Markdown"
+      }, threadId));
       return;
   }
 
@@ -804,7 +823,7 @@ async function handleAdminReply(msg, env, ctx) {
       return;
   }
 
-  if (text === "/info") {
+  if (text === "/info" || text === "/id") {
       const userKey = `user:${userId}`;
       const userRec = await safeGetJSON(env, userKey, null);
       const verifyStatus = await env.TOPIC_MAP.get(`verified:${userId}`);
@@ -821,6 +840,31 @@ async function handleAdminReply(msg, env, ctx) {
     return;
   }
   await tgCall(env, "copyMessage", { chat_id: userId, from_chat_id: env.SUPERGROUP_ID, message_id: msg.message_id });
+}
+
+async function setAdminCommandMenu(env, adminUserId) {
+    const commands = [
+        { command: "id", description: "查看对方 TG ID" },
+        { command: "info", description: "查看用户完整信息" },
+        { command: "close", description: "关闭当前对话" },
+        { command: "open", description: "重新开启对话" },
+        { command: "ban", description: "封禁当前用户" },
+        { command: "unban", description: "解封当前用户" },
+        { command: "trust", description: "设为永久信任" },
+        { command: "reset", description: "重置验证状态" },
+        { command: "cleanup", description: "清理失效话题" },
+        { command: "menu", description: "刷新管理员中文菜单" }
+    ];
+
+    await tgCall(env, "setMyCommands", {
+        commands,
+        scope: {
+            type: "chat_member",
+            chat_id: env.SUPERGROUP_ID,
+            user_id: adminUserId
+        },
+        language_code: "zh"
+    });
 }
 
 // ---------------- 验证模块 (Cloudflare Turnstile) ----------------
@@ -1570,6 +1614,32 @@ async function handleMediaGroup(msg, env, ctx, { direction, targetChat, threadId
     rec.last_ts = Date.now();
     await env.TOPIC_MAP.put(key, JSON.stringify(rec), { expirationTtl: CONFIG.MEDIA_GROUP_EXPIRE_SECONDS });
     ctx.waitUntil(delaySend(env, key, rec.last_ts));
+}
+
+async function sendTransientUserAck(env, ctx, userId) {
+    try {
+        const sent = await tgCall(env, "sendMessage", {
+            chat_id: userId,
+            text: "✅ 已为您转达"
+        });
+
+        const messageId = sent.result?.message_id;
+        if (!sent.ok || !messageId) return;
+
+        ctx.waitUntil((async () => {
+            await new Promise(r => setTimeout(r, CONFIG.USER_ACK_DELETE_DELAY_MS));
+            try {
+                await tgCall(env, "deleteMessage", {
+                    chat_id: userId,
+                    message_id: messageId
+                });
+            } catch (e) {
+                Logger.warn('user_ack_delete_failed', { userId, messageId });
+            }
+        })());
+    } catch (e) {
+        Logger.warn('user_ack_send_failed', { userId });
+    }
 }
 
 // 【修复 #15, #19】改进的媒体提取（支持更多类型，不修改原数组）
