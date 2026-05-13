@@ -830,6 +830,7 @@ async function sendVerificationChallenge(userId, env, pendingMsgId, from = null)
         if (!state || state.userId !== userId) {
             await env.TOPIC_MAP.delete(`user_challenge:${userId}`);
         } else {
+            const verifyUrl = `${env.WORKER_URL}/verify?id=${encodeURIComponent(existingChallenge)}`;
             if (pendingMsgId) {
                 let pendingIds = [];
                 if (Array.isArray(state.pending_ids)) {
@@ -848,6 +849,19 @@ async function sendVerificationChallenge(userId, env, pendingMsgId, from = null)
                     await env.TOPIC_MAP.put(chalKey, JSON.stringify(state), { expirationTtl: CONFIG.VERIFY_EXPIRE_SECONDS });
                 }
             }
+            await tgCall(env, "sendMessage", {
+                chat_id: userId,
+                text: `🛡️ **人机验证**\n\n请点击下方按钮完成安全验证。验证通过后，系统会自动发送您刚才的消息。`,
+                parse_mode: "Markdown",
+                reply_markup: {
+                    inline_keyboard: [[
+                        {
+                            text: "开始验证",
+                            url: verifyUrl
+                        }
+                    ]]
+                }
+            });
             Logger.debug('verification_duplicate_skipped', { userId, verifyId: existingChallenge, hasPending: !!pendingMsgId });
             return;
         }
@@ -892,7 +906,7 @@ async function sendVerificationChallenge(userId, env, pendingMsgId, from = null)
             inline_keyboard: [[
                 {
                     text: "开始验证",
-                    web_app: { url: verifyUrl }
+                    url: verifyUrl
                 }
             ]]
         }
